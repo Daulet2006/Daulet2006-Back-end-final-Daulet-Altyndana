@@ -1,0 +1,98 @@
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import  get_jwt_identity
+from ..models import Pet, User
+from .. import db
+from ..utils import role_required
+
+bp = Blueprint('pets', __name__, url_prefix='/pets')
+
+
+# Получение всех питомцев
+@bp.route('/', methods=['GET'])
+def get_pets():
+    pets = Pet.query.all()
+    return jsonify([{
+        'id': p.id,
+        'name': p.name,
+        'species': p.species,
+        'age': p.age,
+        'price': p.price,
+        'seller_id': p.seller_id
+    } for p in pets])
+
+
+# Получение одного питомца по ID
+@bp.route('/<int:pet_id>', methods=['GET'])
+def get_pet(pet_id):
+    pet = Pet.query.get_or_404(pet_id)
+    return jsonify({
+        'id': pet.id,
+        'name': pet.name,
+        'species': pet.species,
+        'age': pet.age,
+        'price': pet.price,
+        'seller_id': pet.seller_id
+    })
+
+
+# Добавление нового питомца (только для продавца)
+@bp.route('/', methods=['POST'])
+@role_required('seller')
+def add_pet():
+    data = request.get_json()
+    current_user = get_jwt_identity()
+    new_pet = Pet(
+        name=data['name'],
+        species=data['species'],
+        age=data['age'],
+        price=data['price'],
+        seller_id=current_user['id']
+    )
+    db.session.add(new_pet)
+    db.session.commit()
+    return jsonify({'message': 'Pet added'}), 201
+
+
+# Обновление питомца (только для продавца)
+@bp.route('/<int:pet_id>', methods=['PUT'])
+@role_required('seller')
+def update_pet(pet_id):
+    data = request.get_json()
+    pet = Pet.query.get_or_404(pet_id)
+
+    # Обновление данных питомца
+    pet.name = data.get('name', pet.name)
+    pet.species = data.get('species', pet.species)
+    pet.age = data.get('age', pet.age)
+    pet.price = data.get('price', pet.price)
+
+    db.session.commit()
+    return jsonify({'message': 'Pet updated'}), 200
+
+
+# Удаление питомца (только для продавца)
+@bp.route('/<int:pet_id>', methods=['DELETE'])
+@role_required('seller')
+def delete_pet(pet_id):
+    pet = Pet.query.get_or_404(pet_id)
+    db.session.delete(pet)
+    db.session.commit()
+    return jsonify({'message': 'Pet deleted'}), 200
+
+
+# Покупка питомца (только для клиента)
+@bp.route('/buy/<int:pet_id>', methods=['POST'])
+@role_required('customer')
+def buy_pet(pet_id):
+    pet = Pet.query.get_or_404(pet_id)
+    current_user = get_jwt_identity()
+    user = User.query.get(current_user['id'])
+
+    # Проверка, если питомец уже есть у пользователя
+    if pet in user.pets:
+        return jsonify({'message': 'You already own this pet'}), 400
+
+    # Добавление питомца в список питомцев пользователя
+    user.pets.append(pet)
+    db.session.commit()
+    return jsonify({'message': 'Pet purchased'}), 200
