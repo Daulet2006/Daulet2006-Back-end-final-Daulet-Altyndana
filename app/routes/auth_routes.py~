@@ -4,7 +4,7 @@ from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identi
     unset_jwt_cookies
 from ..models import User
 from .. import db, bcrypt  # Import bcrypt
-
+    
 bp = Blueprint('auth', __name__, url_prefix='/auth')
 
 
