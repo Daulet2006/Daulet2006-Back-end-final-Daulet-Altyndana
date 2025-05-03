@@ -2,7 +2,7 @@ import datetime
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, set_access_cookies, \
     unset_jwt_cookies
-from ..models import User
+from ..models import User, Role
 from .. import db, bcrypt  # Import bcrypt
 
 bp = Blueprint('auth', __name__, url_prefix='/auth')
@@ -20,12 +20,25 @@ def register():
     if User.query.filter_by(email=data['email']).first():
         return jsonify({'message': 'Email already registered. Please try logging in or use a different email.'}), 400
 
-    # Create the new user object
+    
+    # Преобразуем строковое значение роли в объект перечисления Role
+    role_value = data['role']
+    role_enum = None
+    
+    # Находим соответствующее значение в перечислении Role
+    for role in Role:
+        if role.value == role_value:
+            role_enum = role
+            break
+    
+    if not role_enum:
+        return jsonify({'message': f'Недопустимое значение роли: {role_value}. Допустимые значения: {[r.value for r in Role]}'}), 400
+    
     new_user = User(
         username=data['username'],
         email=data['email'],
         password=bcrypt.generate_password_hash(data['password']).decode('utf-8'),  # Hash the password using bcrypt
-        role=data['role']
+        role=role_enum
     )
 
     # Add the new user to the database
@@ -36,7 +49,7 @@ def register():
     access_token = create_access_token(identity={
         'id': new_user.id,
         'username': new_user.username,
-        'role': new_user.role
+        'role': new_user.role.value  # Используем строковое значение роли для сериализации
     }, expires_delta=datetime.timedelta(days=1))
 
     return jsonify({
@@ -46,7 +59,7 @@ def register():
             'id': new_user.id,
             'username': new_user.username,
             'email': new_user.email,
-            'role': new_user.role
+            'role': new_user.role.value  # Используем строковое значение роли для сериализации
         }
     }), 201
 
@@ -64,7 +77,7 @@ def login():
         access_token = create_access_token(identity={
             'id': user.id,
             'username': user.username,
-            'role': user.role
+            'role': user.role.value  # Используем строковое значение роли для сериализации
         }, expires_delta=datetime.timedelta(days=1))
 
         return jsonify({
@@ -74,7 +87,7 @@ def login():
                 'id': user.id,
                 'username': user.username,
                 'email': user.email,
-                'role': user.role
+                'role': user.role.value  # Используем строковое значение роли для сериализации
             }
         }), 200
 
