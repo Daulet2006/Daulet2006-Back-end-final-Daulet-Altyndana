@@ -4,6 +4,7 @@ from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identi
     unset_jwt_cookies
 from ..models import User, Role
 from .. import db, bcrypt  # Import bcrypt
+from ..role_utils import get_user_data_with_permissions  # Импорт утилит для работы с ролями
 
 bp = Blueprint('auth', __name__, url_prefix='/auth')
 
@@ -52,15 +53,13 @@ def register():
         'role': new_user.role.value  # Используем строковое значение роли для сериализации
     }, expires_delta=datetime.timedelta(days=1))
 
+    # Получаем данные пользователя с разрешениями для интерфейса
+    user_data = get_user_data_with_permissions(new_user)
+    
     return jsonify({
         'message': 'User registered and logged in successfully.',
         'access_token': access_token,
-        'user': {
-            'id': new_user.id,
-            'username': new_user.username,
-            'email': new_user.email,
-            'role': new_user.role.value  # Используем строковое значение роли для сериализации
-        }
+        'user': user_data
     }), 201
 
 
@@ -80,15 +79,13 @@ def login():
             'role': user.role.value  # Используем строковое значение роли для сериализации
         }, expires_delta=datetime.timedelta(days=1))
 
+        # Получаем данные пользователя с разрешениями для интерфейса
+        user_data = get_user_data_with_permissions(user)
+        
         return jsonify({
             'message': 'Login successful.',
             'access_token': access_token,
-            'user': {
-                'id': user.id,
-                'username': user.username,
-                'email': user.email,
-                'role': user.role.value  # Используем строковое значение роли для сериализации
-            }
+            'user': user_data
         }), 200
 
     # Invalid credentials

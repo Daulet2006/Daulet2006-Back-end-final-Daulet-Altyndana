@@ -48,12 +48,20 @@ def format_order(order):
 
 def check_authorization(order, current_user_id, current_user_role):
     """
-    Проверяет, имеет ли пользователь доступ к указанному заказу.
+    Проверяет права доступа к заказу с учетом ролей и владения товарами.
     """
-    if current_user_role == Role.CLIENT and order.client_id != current_user_id:
-        return False
-    # Добавьте дополнительные проверки для продавцов/администраторов при необходимости
-    return True
+    if current_user_role == Role.CLIENT:
+        return order.client_id == current_user_id
+    
+    if current_user_role in [Role.ADMIN, Role.OWNER]:
+        return True
+    
+    if current_user_role == Role.SELLER:
+        order_products = db.session.query(order_product).filter_by(order_id=order.id).all()
+        seller_products = Product.query.filter_by(seller_id=current_user_id).all()
+        seller_product_ids = {p.id for p in seller_products}
+        return any(assoc.product_id in seller_product_ids for assoc in order_products)
+    return False
 
 
 # Create Order (Client only)
@@ -65,8 +73,14 @@ def create_order():
     client_id = current_user_identity['id']
 
     data = request.get_json()
+    if not data or 'products' not in data or 'pets' not in data:
+        return jsonify({'message': 'Invalid request format'}), 400
+
     product_ids_with_quantity = data.get('products', [])
     pet_ids = data.get('pets', [])
+
+    if not isinstance(product_ids_with_quantity, list) or not isinstance(pet_ids, list):
+        return jsonify({'message': 'Products and pets must be lists'}), 400
 
     if not product_ids_with_quantity and not pet_ids:
         return jsonify({'message': 'Order must contain at least one product or pet'}), 400
@@ -77,27 +91,35 @@ def create_order():
 
     try:
         # Process products in the order
-        for item in product_ids_with_quantity:
-            product_id = item.get('id')
-            quantity = item.get('quantity', 1)
-            if not isinstance(product_id, int) or not isinstance(quantity, int) or quantity <= 0:
-                return jsonify({'message': f'Invalid product data: {item}'}), 400
+        for index, item in enumerate(product_ids_with_quantity):
+            if not isinstance(item, dict) or 'id' not in item or 'quantity' not in item:
+                return jsonify({'message': f'Invalid product format at index {index}'}), 400
+            
+            product_id = item['id']
+            quantity = item['quantity']
+            
+            try:
+                product_id = int(product_id)
+                quantity = int(quantity)
+            except (ValueError, TypeError):
+                return jsonify({'message': f'Invalid product data at index {index}'}), 400
 
             product = Product.query.get(product_id)
             if not product:
                 return jsonify({'message': f'Product with ID {product_id} not found'}), 404
             if product.stock < quantity:
                 return jsonify({
-                                   'message': f'Insufficient stock for product {product.name} (ID: {product_id}). Available: {product.stock}'}), 400
+                    'message': f'Insufficient stock for product {product.name} (ID: {product_id}). Available: {product.stock}'
+                }), 400
 
             products_in_order.append({'product': product, 'quantity': quantity})
             total_amount += product.price * quantity
-            product.stock -= quantity  # Decrease stock
+            # Don't decrease stock yet, wait until the order is fully created
 
         # Process pets in the order
-        for pet_id in pet_ids:
+        for index, pet_id in enumerate(pet_ids):
             if not isinstance(pet_id, int):
-                return jsonify({'message': f'Invalid pet ID: {pet_id}'}), 400
+                return jsonify({'message': f'Invalid pet ID at index {index}: {pet_id}'}), 400
 
             pet = Pet.query.get(pet_id)
             if not pet:
@@ -105,8 +127,8 @@ def create_order():
 
             # Check if pet is already linked to another order
             existing_order_link = db.session.query(order_pet).filter_by(pet_id=pet.id).first()
-            if existing_order_link:
-                return jsonify({'message': f'Pet {pet.name} (ID: {pet_id}) is already part of an order or sold.'}), 400
+            if existing_order_link or pet.status != 'available':
+                return jsonify({'message': f'Pet {pet.name} (ID: {pet_id}) недоступен для заказа. Статус: {pet.status}'}), 400
 
             pets_in_order.append(pet)
             total_amount += pet.price
@@ -129,6 +151,9 @@ def create_order():
                 quantity=item['quantity']
             )
             db.session.execute(stmt)
+            
+            # Now decrease the stock after we're sure the order is being created
+            item['product'].stock -= item['quantity']
 
         # Add pets to the order
         new_order.pets.extend(pets_in_order)
@@ -181,20 +206,48 @@ def get_order(order_id):
 # Update Order Status (Admin/Owner only)
 @bp.route('/<int:order_id>', methods=['PUT', 'PATCH'])
 @jwt_required()
-@role_required(Role.ADMIN, Role.OWNER)
+@role_required(Role.ADMIN, Role.OWNER, Role.SELLER)
 def update_order(order_id):
-    data = request.get_json()
+    current_user_identity = get_jwt_identity()
+    current_user_id = current_user_identity['id']
+    current_user_role = Role(current_user_identity['role'])
 
     try:
         order = Order.query.get_or_404(order_id)
-        if 'status' in data:
-            allowed_statuses = ['Pending', 'Completed', 'Cancelled']
-            if data['status'] not in allowed_statuses:
-                return jsonify({'message': f'Invalid status. Allowed: {", ".join(allowed_statuses)}'}), 400
-            order.status = data['status']
+        
+        if not check_authorization(order, current_user_id, current_user_role):
+            return jsonify({'message': 'Permission denied'}), 403
 
+        data = request.get_json()
+        new_status = data.get('status')
+
+        if not new_status:
+            return jsonify({'message': 'Missing status field'}), 400
+
+        # Validate status transition
+        allowed_transitions = {
+            'Pending': ['Processing', 'Cancelled'],
+            'Processing': ['Shipped', 'Cancelled'],
+            'Shipped': ['Completed'],
+            'Cancelled': [],
+            'Completed': []
+        }
+
+        if new_status not in allowed_transitions.get(order.status, []):
+            return jsonify({'message': f'Invalid status transition from {order.status} to {new_status}'}), 400
+
+        # Update pet statuses
+        if new_status == 'Cancelled':
+            for pet in order.pets:
+                pet.status = 'available'
+        elif new_status == 'Completed':
+            for pet in order.pets:
+                pet.status = 'sold'
+
+        order.status = new_status
         db.session.commit()
         return jsonify({'message': 'Order updated successfully'}), 200
+
     except Exception as e:
         db.session.rollback()
         return jsonify({'message': 'Failed to update order', 'error': str(e)}), 500
@@ -213,3 +266,7 @@ def delete_order(order_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({'message': 'Failed to delete order', 'error': str(e)}), 500
+
+    # Add pets to the order
+    for pet in pets_in_order:
+        pet.status = 'reserved'

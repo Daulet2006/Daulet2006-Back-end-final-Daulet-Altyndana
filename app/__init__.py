@@ -1,5 +1,5 @@
 # app/__init__.py
-from flask import Flask
+from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager
 from flask_cors import CORS
@@ -25,10 +25,22 @@ def create_app():
          supports_credentials=app.config.get('CORS_SUPPORTS_CREDENTIALS', True),
          allow_headers=app.config.get('CORS_ALLOW_HEADERS', ["Content-Type", "Authorization"]),
          methods=app.config.get('CORS_METHODS', ["GET", "POST", "PUT", "DELETE", "OPTIONS"]))
-
+    
+    # Настройка middleware для аутентификации и проверки ролей
+    from .auth_middleware import setup_auth_middleware
+    setup_auth_middleware(app)
+    
     # Import and register routes inside the factory to avoid circular imports
     from app.routes import register_routes
     register_routes(app)
+    
+    # Обработчик ошибок для случаев недостаточных прав доступа
+    @app.errorhandler(403)
+    def forbidden(error):
+        return jsonify({
+            'message': 'Недостаточно прав для выполнения этой операции',
+            'error': str(error)
+        }), 403
 
     with app.app_context():
         db.create_all()
