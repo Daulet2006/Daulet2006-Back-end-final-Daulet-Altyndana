@@ -4,43 +4,6 @@ from flask import jsonify, request, g, current_app
 import jwt
 from .models import User, Role
 
-# Декоратор для проверки роли пользователя
-def role_required(roles):
-    def decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            # Получаем токен из заголовка
-            token = None
-            if 'Authorization' in request.headers:
-                token = request.headers['Authorization'].split(" ")[1]
-            
-            if not token:
-                return jsonify({'message': 'Токен отсутствует!'}), 401
-            
-            try:
-                # Декодируем токен
-                data = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
-                current_user = User.query.filter_by(id=data['user_id']).first()
-                
-                if not current_user:
-                    return jsonify({'message': 'Пользователь не найден!'}), 401
-                
-                # Проверяем роль пользователя
-                if not isinstance(roles, list):
-                    roles = [roles]
-                
-                if current_user.role not in roles:
-                    return jsonify({'message': 'Недостаточно прав для выполнения этой операции!'}), 403
-                
-                # Сохраняем пользователя в g для использования в функции
-                g.user = current_user
-                
-            except Exception as e:
-                return jsonify({'message': f'Ошибка токена: {str(e)}'}), 401
-            
-            return f(*args, **kwargs)
-        return decorated_function
-    return decorator
 
 # Функции для роли CLIENT
 class ClientFunctions:

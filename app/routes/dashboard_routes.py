@@ -1,6 +1,8 @@
 # app/routes/dashboard_routes.py
 from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
+
+from .. import db
 from ..models import Order, Product, Pet, User, Role
 from ..utils import role_required
 from sqlalchemy import func

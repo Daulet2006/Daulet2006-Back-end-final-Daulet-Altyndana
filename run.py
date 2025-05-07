@@ -1,8 +1,10 @@
 # run.py
 from app import create_app, db
 from flask.cli import with_appcontext
-app = create_app()
+import logging
 
+app = create_app()
+logging.basicConfig(level=logging.DEBUG)
 
 @app.cli.command('init-db')
 @with_appcontext

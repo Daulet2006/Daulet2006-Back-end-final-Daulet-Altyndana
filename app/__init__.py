@@ -1,4 +1,5 @@
 # app/__init__.py
+import os
 from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager
@@ -8,10 +9,10 @@ from flask_bcrypt import Bcrypt
 from flask_migrate import Migrate
 
 migrate = Migrate()
-
 db = SQLAlchemy()
 jwt = JWTManager()
 bcrypt = Bcrypt()
+
 
 def create_app():
     app = Flask(__name__)
@@ -19,22 +20,30 @@ def create_app():
     db.init_app(app)
     migrate.init_app(app, db)
     jwt.init_app(app)
-    bcrypt.init_app(app)  # Initialize bcrypt
-    # Enable CORS for all origins
+    bcrypt.init_app(app)
+
+    # Настройка директории для загрузки файлов
+
+    app.config['UPLOAD_FOLDER'] = os.path.join('static', 'uploads')
+    # Проверка и создание директории, если она не существует
+    if not os.path.exists(app.config['UPLOAD_FOLDER']):
+        os.makedirs(app.config['UPLOAD_FOLDER'])
+
+    # Включаем CORS
     CORS(app, resources={r"/*": {"origins": app.config.get('CORS_ORIGINS', '*')}},
          supports_credentials=app.config.get('CORS_SUPPORTS_CREDENTIALS', True),
          allow_headers=app.config.get('CORS_ALLOW_HEADERS', ["Content-Type", "Authorization"]),
          methods=app.config.get('CORS_METHODS', ["GET", "POST", "PUT", "DELETE", "OPTIONS"]))
-    
-    # Настройка middleware для аутентификации и проверки ролей
+
+    # Middleware для аутентификации и проверки ролей
     from .auth_middleware import setup_auth_middleware
     setup_auth_middleware(app)
-    
-    # Import and register routes inside the factory to avoid circular imports
+
+    # Импорт маршрутов
     from app.routes import register_routes
     register_routes(app)
-    
-    # Обработчик ошибок для случаев недостаточных прав доступа
+
+    # Обработчик ошибок
     @app.errorhandler(403)
     def forbidden(error):
         return jsonify({
@@ -43,7 +52,8 @@ def create_app():
         }), 403
 
     with app.app_context():
-        db.create_all()
+        db.create_all()  # Создание всех таблиц
+
     return app
 
 

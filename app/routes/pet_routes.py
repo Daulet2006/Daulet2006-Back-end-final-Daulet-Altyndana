@@ -1,153 +1,189 @@
-# app/routes/pet_routes.py
-from flask import Blueprint, jsonify, request
+# Импорт модулей
+from flask import Blueprint, jsonify, request, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from ..models import Pet, Role
 from .. import db
 from ..utils import role_required
-import logging # Import logging
+import logging
+import os
+import uuid
+from werkzeug.utils import secure_filename
 
-# Configure logging
+# Разрешённые расширения файлов
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Blueprint для маршрутов питомцев
 bp = Blueprint('pets', __name__, url_prefix='/pets')
 
+# Проверка расширения файла
+def allowed_file(filename):
+   """Проверяет, допустимое ли расширение файла."""
+   return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# Helper Functions
+# Форматирование данных питомца
 def format_pet(pet):
-    """
-    Форматирует объект питомца для ответа в формате JSON.
-    """
-    return {
-        'id': pet.id,
-        'name': pet.name,
-        'species': pet.species,
-        'breed': pet.breed,
-        'age': pet.age,
-        'price': pet.price,
-        'description': pet.description,
-        'image_url': pet.image_url,
-        'seller_id': pet.seller_id
-    }
+   """Преобразует объект Pet в словарь для API."""
+   return {
+       'id': str(pet.id) if pet.id is not None else None,
+       'name': pet.name,
+       'species': pet.species,
+       'breed': pet.breed,
+       'age': int(pet.age) if pet.age is not None else None,
+       'price': float(pet.price) if pet.price is not None else None,
+       'description': pet.description,
+       'image_url': pet.image_url,
+       'seller_id': str(pet.seller_id) if pet.seller_id is not None else None
+   }
 
-
+# Проверка авторизации
 def check_pet_authorization(pet, current_user_identity):
-    """
-    Проверяет, имеет ли пользователь доступ к питомцу.
-    """
-    current_user_id = current_user_identity['id']
-    current_user_role = Role(current_user_identity['role'])
+   """Проверяет, может ли пользователь изменять питомца."""
+   current_user_id = current_user_identity['id']
+   role_str = current_user_identity.get('role', '')
+   try:
+       current_user_role = Role(role_str)
+   except ValueError:
+       logger.error(f"Недопустимая роль: {role_str}")
+       return False, "Недопустимая роль"
 
-    if current_user_role not in [Role.ADMIN, Role.OWNER] and pet.seller_id != current_user_id:
-        return False
-    return True
+   if current_user_role in [Role.ADMIN, Role.OWNER] or pet.seller_id == current_user_id:
+       return True, None
+   return False, "Нет прав для изменения питомца"
 
-
-# Create Pet (Seller or Admin/Owner only)
+# Создание питомца
 @bp.route('', methods=['POST'])
 @jwt_required()
 @role_required(Role.SELLER, Role.ADMIN, Role.OWNER)
 def create_pet():
-    current_user_identity = get_jwt_identity()
-    data = request.get_json()
+   """Создаёт питомца, сохраняет файл изображения и путь в БД."""
+   current_user_identity = get_jwt_identity()
 
-    if not all(k in data for k in ('name', 'species', 'age', 'price')):
-        return jsonify({'message': 'Missing required fields (name, species, age, price)'}), 400
+   # Проверка файла
+   if 'image' not in request.files:
+       return jsonify({'message': 'Требуется файл изображения'}), 400
+   image = request.files['image']
+   if image.filename == '' or not allowed_file(image.filename):
+       return jsonify({'message': 'Недопустимый файл'}), 400
 
-    try:
-        new_pet = Pet(
-            name=data['name'],
-            species=data['species'],
-            breed=data.get('breed'),
-            age=int(data['age']),
-            price=float(data['price']),
-            description=data.get('description'),
-            image_url=data.get('image_url'),
-            seller_id=current_user_identity['id']
-        )
-        db.session.add(new_pet)
-        db.session.commit()
-        return jsonify({'message': 'Pet created successfully', 'pet_id': new_pet.id}), 201
-    except ValueError:
-        return jsonify({'message': 'Invalid data format for age or price'}), 400
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'message': 'Failed to create pet', 'error': str(e)}), 500
+   # Сохранение файла
+   filename = secure_filename(image.filename)
+   unique_name = f"{uuid.uuid4().hex}_{filename}"
+   save_path = os.path.join(current_app.config['UPLOAD_FOLDER'], unique_name)
+   os.makedirs(current_app.config['UPLOAD_FOLDER'], exist_ok=True)
+   image.save(save_path)
+   image_url = f"/static/uploads/{unique_name}"
 
+   # Получение данных
+   try:
+       new_pet = Pet(
+           name=request.form.get('name', ''),
+           species=request.form.get('species', ''),
+           breed=request.form.get('breed', ''),
+           age=int(request.form.get('age', 0)),
+           price=float(request.form.get('price', 0.0)),
+           description=request.form.get('description', ''),
+           image_url=image_url,
+           seller_id=current_user_identity['id']
+       )
+       db.session.add(new_pet)
+       db.session.commit()
+       return jsonify({'message': 'Питомец создан', 'pet': format_pet(new_pet)}), 201
+   except Exception as e:
+       db.session.rollback()
+       logger.error(f"Ошибка создания питомца: {e}")
+       return jsonify({'message': 'Ошибка создания питомца', 'error': str(e)}), 500
 
-# Read All Pets (Public)
+# Получение всех питомцев
 @bp.route('', methods=['GET'])
 def get_pets():
-    try:
-        pets = Pet.query.all()
-        return jsonify([format_pet(p) for p in pets]), 200
-    except Exception as e:
-        logger.error(f"Error retrieving pets: {e}", exc_info=True) # Log the full exception
-        return jsonify({'message': 'Failed to retrieve pets', 'error': str(e)}), 500
+   """Возвращает список всех питомцев."""
+   try:
+       pets = Pet.query.all()
+       return jsonify([format_pet(p) for p in pets]), 200
+   except Exception as e:
+       logger.error(f"Ошибка получения питомцев: {e}")
+       return jsonify({'message': 'Ошибка получения питомцев', 'error': str(e)}), 500
 
-
-
-# Read Single Pet (Public)
+# Получение одного питомца
 @bp.route('/<int:pet_id>', methods=['GET'])
 def get_pet(pet_id):
-    try:
-        pet = Pet.query.get_or_404(pet_id)
-        return jsonify(format_pet(pet)), 200
-    except Exception as e:
-        return jsonify({'message': 'Failed to retrieve pet', 'error': str(e)}), 500
+   """Возвращает данные питомца по ID."""
+   try:
+       pet = Pet.query.get_or_404(pet_id)
+       return jsonify(format_pet(pet)), 200
+   except Exception as e:
+       logger.error(f"Ошибка получения питомца {pet_id}: {e}")
+       return jsonify({'message': 'Ошибка получения питомца', 'error': str(e)}), 500
 
-
-# Update Pet (Seller who owns it or Admin/Owner)
+# Обновление питомца
 @bp.route('/<int:pet_id>', methods=['PUT', 'PATCH'])
 @jwt_required()
 @role_required(Role.SELLER, Role.ADMIN, Role.OWNER)
 def update_pet(pet_id):
-    current_user_identity = get_jwt_identity()
-    data = request.get_json()
+   """Обновляет питомца, включая замену изображения."""
+   current_user_identity = get_jwt_identity()
+   try:
+       pet = Pet.query.get_or_404(pet_id)
+       authorized, error_message = check_pet_authorization(pet, current_user_identity)
+       if not authorized:
+           return jsonify({'message': error_message}), 403
 
-    try:
-        pet = Pet.query.get_or_404(pet_id)
+       # Обновление полей
+       if 'name' in request.form:
+           pet.name = request.form['name']
+       if 'species' in request.form:
+           pet.species = request.form['species']
+       if 'breed' in request.form:
+           pet.breed = request.form['breed']
+       if 'age' in request.form:
+           pet.age = int(request.form['age'])
+       if 'price' in request.form:
+           pet.price = float(request.form['price'])
+       if 'description' in request.form:
+           pet.description = request.form['description']
 
-        if not check_pet_authorization(pet, current_user_identity):
-            return jsonify({'message': 'Permission denied: Not the owner or admin/owner'}), 403
+       # Обработка изображения
+       if 'image' in request.files:
+           image = request.files['image']
+           if image.filename == '' or not allowed_file(image.filename):
+               return jsonify({'message': 'Недопустимый файл'}), 400
+           if pet.image_url:
+               old_path = os.path.join(current_app.root_path, pet.image_url.strip("/"))
+               if os.path.exists(old_path):
+                   os.remove(old_path)
+           filename = f"{uuid.uuid4().hex}_{secure_filename(image.filename)}"
+           upload_path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+           os.makedirs(current_app.config['UPLOAD_FOLDER'], exist_ok=True)
+           image.save(upload_path)
+           pet.image_url = f"/static/uploads/{filename}"
 
-        # Update fields (PATCH semantics)
-        if 'name' in data: pet.name = data['name']
-        if 'species' in data: pet.species = data['species']
-        if 'breed' in data: pet.breed = data['breed']
-        if 'age' in data: pet.age = int(data['age'])
-        if 'price' in data: pet.price = float(data['price'])
-        if 'description' in data: pet.description = data['description']
-        if 'image_url' in data: pet.image_url = data['image_url']
+       db.session.commit()
+       return jsonify({'message': 'Питомец обновлён', 'pet': format_pet(pet)}), 200
+   except Exception as e:
+       db.session.rollback()
+       logger.error(f"Ошибка обновления питомца {pet_id}: {e}")
+       return jsonify({'message': 'Ошибка обновления питомца', 'error': str(e)}), 500
 
-        db.session.commit()
-        return jsonify({'message': 'Pet updated successfully'}), 200
-
-    except ValueError:
-        db.session.rollback()
-        return jsonify({'message': 'Invalid data format for age or price'}), 400
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'message': 'Failed to update pet', 'error': str(e)}), 500
-
-
-# Delete Pet (Seller who owns it or Admin/Owner)
+# Удаление питомца
 @bp.route('/<int:pet_id>', methods=['DELETE'])
 @jwt_required()
 @role_required(Role.SELLER, Role.ADMIN, Role.OWNER)
 def delete_pet(pet_id):
-    current_user_identity = get_jwt_identity()
-
-    try:
-        pet = Pet.query.get_or_404(pet_id)
-
-        if not check_pet_authorization(pet, current_user_identity):
-            return jsonify({'message': 'Permission denied: Not the owner or admin/owner'}), 403
-
-        db.session.delete(pet)
-        db.session.commit()
-        return jsonify({'message': 'Pet deleted successfully'}), 200
-
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'message': 'Failed to delete pet', 'error': str(e)}), 500
+   """Удаляет питомца по ID."""
+   current_user_identity = get_jwt_identity()
+   try:
+       pet = Pet.query.get_or_404(pet_id)
+       authorized, error_message = check_pet_authorization(pet, current_user_identity)
+       if not authorized:
+           return jsonify({'message': error_message}), 403
+       db.session.delete(pet)
+       db.session.commit()
+       return jsonify({'message': 'Питомец удалён'}), 200
+   except Exception as e:
+       db.session.rollback()
+       logger.error(f"Ошибка удаления питомца {pet_id}: {e}")
+       return jsonify({'message': 'Ошибка удаления питомца', 'error': str(e)}), 500

@@ -1,3 +1,4 @@
+# app/models.py
 from . import db
 from datetime import datetime
 import enum
@@ -43,10 +44,10 @@ class User(db.Model):
     products_for_sale = db.relationship('Product', backref='seller', lazy=True, foreign_keys='Product.seller_id')
     pets_for_sale = db.relationship('Pet', backref='seller', lazy=True, foreign_keys='Pet.seller_id')
     appointments_as_vet = db.relationship('VetAppointment', backref='veterinarian', lazy=True, foreign_keys='VetAppointment.vet_id')
+    # Отношение с сообщениями чата определено в модели ChatMessage
 
     def __repr__(self):
         return f'<User {self.username} ({self.role.value})>'
-
 
 class Category(db.Model):
     __tablename__ = 'category'
@@ -57,7 +58,6 @@ class Category(db.Model):
 
     def __repr__(self):
         return f'<Category {self.name}>'
-
 
 class Product(db.Model):
     __tablename__ = 'product'
@@ -88,7 +88,7 @@ class Pet(db.Model):
     seller_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     category_id = db.Column(db.Integer, db.ForeignKey('category.id'), nullable=True)
 
-    # Relationship to VetAppointments
+    # Change backref to avoid conflict with `appointments`
     appointments = db.relationship('VetAppointment', secondary=appointment_pet, back_populates='pets')
 
     def __repr__(self):
@@ -118,8 +118,8 @@ class VetAppointment(db.Model):
     reason = db.Column(db.String(300))
     status = db.Column(db.String(50), default='Scheduled')
 
-    # Relationship to Pets via appointment_pet
-    pets = db.relationship('Pet', secondary=appointment_pet, back_populates='appointments')
+    # Change backref to `pet_appointments`
+    pets = db.relationship('Pet', secondary=appointment_pet, lazy='subquery', back_populates='appointments')
 
     def __repr__(self):
         return f'<VetAppointment {self.id} for User {self.client_id} with Vet {self.vet_id}>'
@@ -132,11 +132,11 @@ class ChatMessage(db.Model):
     message = db.Column(db.Text, nullable=False)
     reply = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    file_path = db.Column(db.String(255), nullable=True)  # Path to uploaded file
-    file_name = db.Column(db.String(255), nullable=True)  # Original file name
-    file_type = db.Column(db.String(100), nullable=True)  # MIME type of file
+    file_path = db.Column(db.String(255), nullable=True)  # Путь к загруженному файлу
+    file_name = db.Column(db.String(255), nullable=True)  # Оригинальное имя файла
+    file_type = db.Column(db.String(100), nullable=True)  # MIME-тип файла
 
-    # Relationship with user
+    # Отношение с пользователем
     user = db.relationship('User', backref=db.backref('chat_messages', lazy=True))
 
     def __repr__(self):
