@@ -1,9 +1,0 @@
-import bcrypt
-
-hashed = b"$2b$12$qP6D2lvIti5F52lXabEj6.3VfTV.CXEoQF9ydWbw7XVPX.KroL9Me"
-password = b"adminadmin"
-
-if bcrypt.checkpw(password, hashed):
-    print("Password matches!")
-else:
-    print("Incorrect password.")

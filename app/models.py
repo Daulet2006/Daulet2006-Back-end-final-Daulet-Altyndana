@@ -1,3 +1,4 @@
+# app/models.py
 from . import db
 from datetime import datetime
 import enum
@@ -36,7 +37,7 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
     role = db.Column(db.Enum(Role), nullable=True, default=Role.CLIENT)
-
+    isBanned=db.Column(db.Boolean, nullable=False, default=False)
     # Relationships
     orders = db.relationship('Order', backref='client', lazy=True, foreign_keys='Order.client_id')
     appointments_as_client = db.relationship('VetAppointment', backref='client', lazy=True, foreign_keys='VetAppointment.client_id')
@@ -47,17 +48,16 @@ class User(db.Model):
     def __repr__(self):
         return f'<User {self.username} ({self.role.value})>'
 
-
 class Category(db.Model):
     __tablename__ = 'category'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), unique=True, nullable=False)
     description = db.Column(db.String(300))
     products = db.relationship('Product', backref='category', lazy=True)
+    pets = db.relationship('Pet', backref='category', lazy=True)  # Added for pet categorization
 
     def __repr__(self):
         return f'<Category {self.name}>'
-
 
 class Product(db.Model):
     __tablename__ = 'product'
@@ -74,7 +74,6 @@ class Product(db.Model):
     def __repr__(self):
         return f'<Product {self.name}>'
 
-
 class Pet(db.Model):
     __tablename__ = 'pet'
     id = db.Column(db.Integer, primary_key=True)
@@ -87,13 +86,14 @@ class Pet(db.Model):
     image_url = db.Column(db.String(255))
     seller_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     category_id = db.Column(db.Integer, db.ForeignKey('category.id'), nullable=True)
+    status = db.Column(db.String(50), default='available')  # Added for order logic
 
-    # Relationship to VetAppointments
+    # Relationships
     appointments = db.relationship('VetAppointment', secondary=appointment_pet, back_populates='pets')
+    orders = db.relationship('Order', secondary=order_pet, back_populates='pets')
 
     def __repr__(self):
         return f'<Pet {self.name} ({self.species})>'
-
 
 class Order(db.Model):
     __tablename__ = 'order'
@@ -103,11 +103,10 @@ class Order(db.Model):
     total_amount = db.Column(db.Float, nullable=False)
     status = db.Column(db.String(50), default='Pending')
     products = db.relationship('Product', secondary=order_product, lazy='subquery', backref=db.backref('orders', lazy=True))
-    pets = db.relationship('Pet', secondary=order_pet, lazy='subquery', backref=db.backref('orders', lazy=True))
+    pets = db.relationship('Pet', secondary=order_pet, lazy='subquery', back_populates='orders')
 
     def __repr__(self):
         return f'<Order {self.id} by User {self.client_id}>'
-
 
 class VetAppointment(db.Model):
     __tablename__ = 'vet_appointment'
@@ -117,13 +116,13 @@ class VetAppointment(db.Model):
     appointment_date = db.Column(db.DateTime, nullable=False)
     reason = db.Column(db.String(300))
     status = db.Column(db.String(50), default='Scheduled')
+    VALID_STATUSES = ['Scheduled', 'Completed', 'Cancelled']  # Added for validation
 
-    # Relationship to Pets via appointment_pet
+    # Relationship to Pets
     pets = db.relationship('Pet', secondary=appointment_pet, back_populates='appointments')
 
     def __repr__(self):
         return f'<VetAppointment {self.id} for User {self.client_id} with Vet {self.vet_id}>'
-
 
 class ChatMessage(db.Model):
     __tablename__ = 'chat_message'
@@ -132,9 +131,9 @@ class ChatMessage(db.Model):
     message = db.Column(db.Text, nullable=False)
     reply = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    file_path = db.Column(db.String(255), nullable=True)  # Path to uploaded file
-    file_name = db.Column(db.String(255), nullable=True)  # Original file name
-    file_type = db.Column(db.String(100), nullable=True)  # MIME type of file
+    file_path = db.Column(db.String(255), nullable=True)
+    file_name = db.Column(db.String(255), nullable=True)
+    file_type = db.Column(db.String(100), nullable=True)
 
     # Relationship with user
     user = db.relationship('User', backref=db.backref('chat_messages', lazy=True))

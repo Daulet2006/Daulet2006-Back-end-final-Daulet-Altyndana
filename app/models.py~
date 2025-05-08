@@ -44,7 +44,6 @@ class User(db.Model):
     products_for_sale = db.relationship('Product', backref='seller', lazy=True, foreign_keys='Product.seller_id')
     pets_for_sale = db.relationship('Pet', backref='seller', lazy=True, foreign_keys='Pet.seller_id')
     appointments_as_vet = db.relationship('VetAppointment', backref='veterinarian', lazy=True, foreign_keys='VetAppointment.vet_id')
-    # Отношение с сообщениями чата определено в модели ChatMessage
 
     def __repr__(self):
         return f'<User {self.username} ({self.role.value})>'
@@ -55,6 +54,7 @@ class Category(db.Model):
     name = db.Column(db.String(100), unique=True, nullable=False)
     description = db.Column(db.String(300))
     products = db.relationship('Product', backref='category', lazy=True)
+    pets = db.relationship('Pet', backref='category', lazy=True)  # Added for pet categorization
 
     def __repr__(self):
         return f'<Category {self.name}>'
@@ -74,7 +74,6 @@ class Product(db.Model):
     def __repr__(self):
         return f'<Product {self.name}>'
 
-
 class Pet(db.Model):
     __tablename__ = 'pet'
     id = db.Column(db.Integer, primary_key=True)
@@ -87,13 +86,14 @@ class Pet(db.Model):
     image_url = db.Column(db.String(255))
     seller_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     category_id = db.Column(db.Integer, db.ForeignKey('category.id'), nullable=True)
+    status = db.Column(db.String(50), default='available')  # Added for order logic
 
-    # Change backref to avoid conflict with `appointments`
+    # Relationships
     appointments = db.relationship('VetAppointment', secondary=appointment_pet, back_populates='pets')
+    orders = db.relationship('Order', secondary=order_pet, back_populates='pets')
 
     def __repr__(self):
         return f'<Pet {self.name} ({self.species})>'
-
 
 class Order(db.Model):
     __tablename__ = 'order'
@@ -103,11 +103,10 @@ class Order(db.Model):
     total_amount = db.Column(db.Float, nullable=False)
     status = db.Column(db.String(50), default='Pending')
     products = db.relationship('Product', secondary=order_product, lazy='subquery', backref=db.backref('orders', lazy=True))
-    pets = db.relationship('Pet', secondary=order_pet, lazy='subquery', backref=db.backref('orders', lazy=True))
+    pets = db.relationship('Pet', secondary=order_pet, lazy='subquery', back_populates='orders')
 
     def __repr__(self):
         return f'<Order {self.id} by User {self.client_id}>'
-
 
 class VetAppointment(db.Model):
     __tablename__ = 'vet_appointment'
@@ -117,13 +116,13 @@ class VetAppointment(db.Model):
     appointment_date = db.Column(db.DateTime, nullable=False)
     reason = db.Column(db.String(300))
     status = db.Column(db.String(50), default='Scheduled')
+    VALID_STATUSES = ['Scheduled', 'Completed', 'Cancelled']  # Added for validation
 
-    # Change backref to `pet_appointments`
-    pets = db.relationship('Pet', secondary=appointment_pet, lazy='subquery', back_populates='appointments')
+    # Relationship to Pets
+    pets = db.relationship('Pet', secondary=appointment_pet, back_populates='appointments')
 
     def __repr__(self):
         return f'<VetAppointment {self.id} for User {self.client_id} with Vet {self.vet_id}>'
-
 
 class ChatMessage(db.Model):
     __tablename__ = 'chat_message'
@@ -132,11 +131,11 @@ class ChatMessage(db.Model):
     message = db.Column(db.Text, nullable=False)
     reply = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    file_path = db.Column(db.String(255), nullable=True)  # Путь к загруженному файлу
-    file_name = db.Column(db.String(255), nullable=True)  # Оригинальное имя файла
-    file_type = db.Column(db.String(100), nullable=True)  # MIME-тип файла
+    file_path = db.Column(db.String(255), nullable=True)
+    file_name = db.Column(db.String(255), nullable=True)
+    file_type = db.Column(db.String(100), nullable=True)
 
-    # Отношение с пользователем
+    # Relationship with user
     user = db.relationship('User', backref=db.backref('chat_messages', lazy=True))
 
     def __repr__(self):

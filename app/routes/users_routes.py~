@@ -76,29 +76,4 @@ class UserResource(Resource):
         db.session.delete(user)
         db.session.commit()
         return {'message': 'User deleted successfully'}, 200
-# Swagger model для бана/разбана
-ban_model = users_ns.model('BanUser', {
-    'isBanned': fields.Boolean(required=True, description='True чтобы забанить, False чтобы разбанить')
-})
-
-@users_ns.route('/<int:user_id>/ban')
-class BanUser(Resource):
-    @jwt_required()
-    @role_required(Role.ADMIN, Role.OWNER)
-    @users_ns.expect(ban_model)
-    def put(self, user_id):
-        """Забанить или разбанить пользователя"""
-        user = User.query.get_or_404(user_id)
-        data = request.get_json()
-
-        if 'isBanned' not in data:
-            return {'message': 'Поле isBanned обязательно'}, 400
-
-        if user.id == get_jwt_identity().get('id'):
-            return {'message': 'Вы не можете забанить самого себя'}, 400
-
-        user.isBanned = data['isBanned']
-        db.session.commit()
-        status = 'забанен' if user.isBanned else 'разбанен'
-        return {'message': f'Пользователь успешно {status}'}, 200
 

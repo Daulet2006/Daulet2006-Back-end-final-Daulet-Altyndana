@@ -1,11 +1,5 @@
-# app/role_functions.py
-from functools import wraps
-from flask import jsonify, request, g, current_app
-import jwt
-from .models import User, Role
+from .models import Role, Product, Pet, VetAppointment
 
-
-# Функции для роли CLIENT
 class ClientFunctions:
     @staticmethod
     def can_view_products():
@@ -35,7 +29,6 @@ class ClientFunctions:
     def can_send_message():
         return True
 
-# Функции для роли SELLER
 class SellerFunctions:
     @staticmethod
     def can_view_products():
@@ -47,15 +40,11 @@ class SellerFunctions:
     
     @staticmethod
     def can_update_product(user_id, product_id):
-        # Проверка, является ли пользователь владельцем продукта
-        from .models import Product
         product = Product.query.get(product_id)
         return product and product.seller_id == user_id
     
     @staticmethod
     def can_delete_product(user_id, product_id):
-        # Проверка, является ли пользователь владельцем продукта
-        from .models import Product
         product = Product.query.get(product_id)
         return product and product.seller_id == user_id
     
@@ -69,15 +58,11 @@ class SellerFunctions:
     
     @staticmethod
     def can_update_pet(user_id, pet_id):
-        # Проверка, является ли пользователь владельцем питомца
-        from .models import Pet
         pet = Pet.query.get(pet_id)
         return pet and pet.seller_id == user_id
     
     @staticmethod
     def can_delete_pet(user_id, pet_id):
-        # Проверка, является ли пользователь владельцем питомца
-        from .models import Pet
         pet = Pet.query.get(pet_id)
         return pet and pet.seller_id == user_id
     
@@ -89,7 +74,6 @@ class SellerFunctions:
     def can_send_message():
         return True
 
-# Функции для роли VETERINARIAN
 class VeterinarianFunctions:
     @staticmethod
     def can_view_appointments():
@@ -97,8 +81,6 @@ class VeterinarianFunctions:
     
     @staticmethod
     def can_update_appointment(user_id, appointment_id):
-        # Проверка, является ли пользователь ветеринаром для данной записи
-        from .models import VetAppointment
         appointment = VetAppointment.query.get(appointment_id)
         return appointment and appointment.vet_id == user_id
     
@@ -110,7 +92,6 @@ class VeterinarianFunctions:
     def can_send_message():
         return True
 
-# Функции для роли ADMIN
 class AdminFunctions:
     @staticmethod
     def can_view_all_users():
@@ -172,10 +153,7 @@ class AdminFunctions:
     def can_send_message():
         return True
 
-# Функции для роли OWNER
 class OwnerFunctions(AdminFunctions):
-    # Владелец имеет все права администратора плюс дополнительные
-    
     @staticmethod
     def can_manage_admins():
         return True
@@ -188,7 +166,6 @@ class OwnerFunctions(AdminFunctions):
     def can_configure_system():
         return True
 
-# Функция для получения класса функций по роли
 def get_role_functions(role):
     role_map = {
         Role.CLIENT: ClientFunctions,
@@ -197,4 +174,4 @@ def get_role_functions(role):
         Role.ADMIN: AdminFunctions,
         Role.OWNER: OwnerFunctions
     }
-    return role_map.get(role, ClientFunctions)  # По умолчанию возвращаем функции клиента
+    return role_map.get(role, ClientFunctions)
