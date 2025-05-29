@@ -1,3 +1,4 @@
+# app/role_utils.py
 from .models import Role, User
 from . import db
 
@@ -20,14 +21,6 @@ ROLE_PERMISSIONS = {
             'view_products', 'create_product', 'update_own_product', 'delete_own_product',
             'view_pets', 'create_pet', 'update_own_pet', 'delete_own_pet',
             'view_own_sales', 'send_message'
-        ]
-    },
-    Role.VETERINARIAN: {
-        'interface_sections': [
-            'profile', 'appointments', 'pets', 'chat'
-        ],
-        'actions': [
-            'view_appointments', 'update_appointment', 'view_pets', 'send_message'
         ]
     },
     Role.ADMIN: {
