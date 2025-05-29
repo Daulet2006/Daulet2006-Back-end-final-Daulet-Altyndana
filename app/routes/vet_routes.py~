@@ -1,0 +1,214 @@
+from flask_restx import Namespace, Resource, fields
+from flask import request
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from .appointment_routes import parse_and_validate_date, check_vet_availability
+from ..models import User, Role, VetAppointment, Pet
+from .. import db
+from ..utils import role_required
+from datetime import datetime
+
+vet_ns = Namespace('vets', description='Операции с ветеринарами')
+
+vet_model = vet_ns.model('Vet', {
+    'username': fields.String(required=True, description='Имя пользователя ветеринара'),
+    'email': fields.String(required=True, description='Email ветеринара')
+})
+
+appointment_model = vet_ns.model('Appointment', {
+    'pet_ids': fields.List(fields.Integer, required=True, description='ID питомцев'),
+    'vet_id': fields.Integer(required=True, description='ID ветеринара'),
+    'client_id': fields.Integer(required=True, description='ID клиента'),
+    'appointment_date': fields.String(required=True, description='Дата приема в формате ISO'),
+    'reason': fields.String(description='Причина визита'),
+    'status': fields.String(description='Статус приема'),
+    'comment': fields.String(description='Комментарий ветеринара')
+})
+
+def format_vet(vet):
+    return {
+        'id': vet.id,
+        'username': vet.username,
+        'email': vet.email
+    }
+
+def format_appointment(appointment):
+    return {
+        'id': appointment.id,
+        'pet_ids': [pet.id for pet in appointment.pets],
+        'pets': [{'id': pet.id, 'name': pet.name, 'species': pet.species} for pet in appointment.pets],
+        'vet_id': appointment.vet_id,
+        'client_id': appointment.client_id,
+        'client': {'username': appointment.client.username} if appointment.client else None,
+        'appointment_date': appointment.appointment_date.isoformat(),
+        'reason': appointment.reason,
+        'status': appointment.status,
+        'comment': appointment.comment
+    }
+
+@vet_ns.route('')
+class VetList(Resource):
+    def get(self):
+        try:
+            vets = User.query.filter_by(role=Role.VETERINARIAN).all()
+            return [format_vet(v) for v in vets], 200
+        except Exception as e:
+            return {'message': 'Ошибка получения ветеринаров', 'error': str(e)}, 500
+
+@vet_ns.route('/<int:vet_id>')
+class VetResource(Resource):
+    def get(self, vet_id):
+        try:
+            vet = User.query.get_or_404(vet_id)
+            if vet.role != Role.VETERINARIAN:
+                return {'message': 'Не является ветеринаром'}, 400
+            return format_vet(vet), 200
+        except Exception as e:
+            return {'message': 'Ошибка получения ветеринара', 'error': str(e)}, 500
+
+    @jwt_required()
+    @role_required(Role.ADMIN)
+    @vet_ns.expect(vet_model)
+    def put(self, vet_id):
+        data = request.get_json()
+        try:
+            vet = User.query.get_or_404(vet_id)
+            if vet.role != Role.VETERINARIAN:
+                return {'message': 'Не является ветеринаром'}, 400
+
+            if 'email' in data:
+                vet.email = data['email']
+            if 'username' in data:
+                vet.username = data['username']
+
+            db.session.commit()
+            return {'message': 'Информация о ветеринаре обновлена'}, 200
+        except Exception as e:
+            return {'message': 'Ошибка обновления ветеринара', 'error': str(e)}, 500
+
+    @jwt_required()
+    @role_required(Role.ADMIN)
+    def delete(self, vet_id):
+        try:
+            vet = User.query.get_or_404(vet_id)
+            if vet.role != Role.VETERINARIAN:
+                return {'message': 'Не является ветеринаром'}, 400
+            db.session.delete(vet)
+            db.session.commit()
+            return {'message': 'Ветеринар удален'}, 200
+        except Exception as e:
+            return {'message': 'Ошибка удаления ветеринара', 'error': str(e)}, 500
+
+@vet_ns.route('/appointments/<int:vet_id>')
+class VetAppointments(Resource):
+    def get(self, vet_id):
+        try:
+            vet = User.query.get_or_404(vet_id)
+            if vet.role != Role.VETERINARIAN:
+                return {'message': 'Не является ветеринаром'}, 400
+            appointments = VetAppointment.query.filter_by(vet_id=vet_id).all()
+            return [format_appointment(a) for a in appointments], 200
+        except Exception as e:
+            return {'message': 'Ошибка получения приемов', 'error': str(e)}, 500
+
+@vet_ns.route('/appointments')
+class VetCreateAppointment(Resource):
+    @jwt_required()
+    @role_required(Role.VETERINARIAN)
+    @vet_ns.expect(appointment_model)
+    def post(self):
+        current_user = get_jwt_identity()
+        user_id = current_user['id']
+        data = request.get_json()
+
+        try:
+            vet = User.query.filter_by(id=data['vet_id'], role=Role.VETERINARIAN).first()
+            if not vet:
+                return {'message': 'Ветеринар не найден'}, 404
+            if vet.id != user_id:
+                return {'message': 'Вы можете создавать записи только для себя'}, 403
+
+            client = User.query.filter_by(id=data['client_id'], role=Role.CLIENT).first()
+            if not client:
+                return {'message': 'Клиент не найден'}, 404
+
+            appointment_date = parse_and_validate_date(data['appointment_date'])
+            if not check_vet_availability(data['vet_id'], appointment_date):
+                return {'message': 'Ветеринар занят в указанное время'}, 409
+
+            pet_ids = data.get('pet_ids', [])
+            if isinstance(pet_ids, int):
+                pet_ids = [pet_ids]
+            if not isinstance(pet_ids, list) or not pet_ids:
+                return {'message': 'Необходимо указать хотя бы одного питомца'}, 400
+
+            new_appointment = VetAppointment(
+                client_id=data['client_id'],
+                vet_id=data['vet_id'],
+                appointment_date=appointment_date,
+                reason=data['reason'],
+                status=data.get('status', 'Scheduled'),
+                comment=data.get('comment', '')
+            )
+
+            pets = []
+            for pid in pet_ids:
+                pet = Pet.query.get(pid)
+                if not pet:
+                    return {'message': f'Питомец {pid} не найден'}, 404
+                if pet.seller_id != data['client_id']:
+                    return {'message': f'Питомец {pid} не принадлежит указанному клиенту'}, 403
+                pets.append(pet)
+
+            new_appointment.pets = pets
+            db.session.add(new_appointment)
+            db.session.commit()
+
+            return {'message': 'Прием создан', 'appointment_id': new_appointment.id}, 201
+        except ValueError as ve:
+            return {'message': str(ve)}, 400
+        except Exception as e:
+            db.session.rollback()
+            return {'message': 'Ошибка создания приема', 'error': str(e)}, 500
+
+@vet_ns.route('/<int:vet_id>/availability')
+class VetAvailability(Resource):
+    def get(self, vet_id):
+        date_str = request.args.get('date')
+        try:
+            date = datetime.fromisoformat(date_str)
+            appointments = VetAppointment.query.filter(
+                VetAppointment.vet_id == vet_id,
+                VetAppointment.status != 'Cancelled',
+                VetAppointment.appointment_date >= date.replace(hour=0, minute=0),
+                VetAppointment.appointment_date < date.replace(hour=23, minute=59)
+            ).all()
+            booked_slots = [appt.appointment_date.isoformat() for appt in appointments]
+            return {'booked_slots': booked_slots}, 200
+        except Exception as e:
+            return {'message': 'Ошибка получения доступности', 'error': str(e)}, 500
+
+@vet_ns.route('/appointments/<int:appointment_id>/status')
+class AppointmentStatus(Resource):
+    @jwt_required()
+    @role_required(Role.VETERINARIAN)
+    @vet_ns.expect(vet_ns.model('Status', {
+        'status': fields.String(required=True),
+        'comment': fields.String(description='Комментарий ветеринара')
+    }))
+    def put(self, appointment_id):
+        current_user = get_jwt_identity()
+        user_id = current_user['id']
+        data = request.get_json()
+        try:
+            appointment = VetAppointment.query.get_or_404(appointment_id)
+            if appointment.vet_id != user_id:
+                return {'message': 'Вы не назначены на этот прием'}, 403
+            if data.get('status') not in VetAppointment.VALID_STATUSES:
+                return {'message': f"Недопустимый статус. Допустимые: {', '.join(VetAppointment.VALID_STATUSES)}"}, 400
+            appointment.status = data.get('status')
+            if 'comment' in data:
+                appointment.comment = data['comment']
+            db.session.commit()
+            return format_appointment(appointment), 200
+        except Exception as e:
+            return {'message': 'Ошибка обновления статуса приема', 'error': str(e)}, 500

@@ -1,0 +1,121 @@
+# app/routes/auth_service.py
+from flask_jwt_extended import create_access_token, unset_jwt_cookies, get_jwt_identity
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
+from .. import db, bcrypt
+from app.utils.role_utils import get_user_data_with_permissions
+from app.models.user_model import User, Role
+import datetime
+import re
+import json
+
+PASSWORD_REGEX = re.compile(r'^(?=.*[A-Za-z])(?=.*\d).{6,}$')
+EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
+
+class AuthService:
+    @staticmethod
+    def get_roles():
+        """Возвращает список всех доступных ролей."""
+        return [role.value for role in Role]
+
+    @staticmethod
+    def get_next_user_id():
+        """Генерирует следующий уникальный ID для нового пользователя."""
+        max_id = db.session.query(func.max(User.id)).scalar()
+        return 1 if max_id is None else max_id + 1
+
+    @staticmethod
+    def register_user(data):
+        """Регистрирует нового пользователя с ролью CLIENT."""
+        if not all(k in data for k in ('username', 'email', 'password')):
+            raise ValueError('Отсутствуют обязательные поля: username, email, password.')
+
+        if not EMAIL_REGEX.match(data['email']):
+            raise ValueError('Неверный формат email.')
+
+        if not PASSWORD_REGEX.match(data['password']):
+            raise ValueError('Пароль должен быть минимум 6 символов, содержать хотя бы одну букву и одну цифру.')
+
+        if User.query.filter_by(email=data['email']).first():
+            raise ValueError('Email уже зарегистрирован.')
+
+        if User.query.filter_by(username=data['username']).first():
+            raise ValueError('Имя пользователя занято.')
+
+        new_user_id = AuthService.get_next_user_id()
+        new_user = User(
+            id=new_user_id,
+            username=data['username'],
+            email=data['email'],
+            password=bcrypt.generate_password_hash(data['password']).decode('utf-8'),
+            role=Role.CLIENT.value
+        )
+
+        try:
+            db.session.add(new_user)
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            raise ValueError('Ошибка базы данных: невозможно зарегистрировать пользователя.')
+
+        access_token = create_access_token(
+            identity={'id': new_user.id, 'username': new_user.username, 'role': new_user.role.value},
+            expires_delta=datetime.timedelta(minutes=30)
+        )
+        user_data = get_user_data_with_permissions(new_user)
+
+        return {
+            'message': 'Пользователь успешно зарегистрирован.',
+            'access_token': access_token,
+            'user': user_data
+        }
+
+    @staticmethod
+    def login_user(data):
+        """Аутентифицирует пользователя и возвращает токен."""
+        if not all(k in data for k in ('email', 'password')):
+            raise ValueError('Отсутствуют обязательные поля: email, password.')
+
+        if not EMAIL_REGEX.match(data['email']):
+            raise ValueError('Неверный формат email.')
+
+        user = User.query.filter_by(email=data['email']).first()
+        if not user:
+            raise ValueError('Пользователь не найден.')
+
+        if user.isBanned:
+            raise ValueError('Ваш аккаунт заблокирован. Обратитесь в поддержку.')
+
+        if not bcrypt.check_password_hash(user.password, data['password']):
+            raise ValueError('Неверный пароль.')
+
+        access_token = create_access_token(
+            identity={'id': user.id, 'username': user.username, 'role': user.role.value},
+            expires_delta=datetime.timedelta(minutes=30)
+        )
+        user_data = get_user_data_with_permissions(user)
+
+        return {
+            'message': 'Вход выполнен успешно.',
+            'access_token': access_token,
+            'user': user_data
+        }
+
+    @staticmethod
+    def logout_user():
+        """Выполняет выход пользователя, аннулируя токен."""
+        response = json.dumps({'message': 'Выход выполнен успешно.'})
+        response = unset_jwt_cookies(response)
+        return response
+
+    @staticmethod
+    def verify_token():
+        """Проверяет валидность токена и возвращает данные пользователя."""
+        identity = get_jwt_identity()
+        user = User.query.get(identity['id'])
+        if not user:
+            raise ValueError('Пользователь не найден.')
+        return {
+            'message': 'Токен действителен.',
+            'user': get_user_data_with_permissions(user)
+        }

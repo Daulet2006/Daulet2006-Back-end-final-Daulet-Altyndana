@@ -1,3 +1,4 @@
+# config.py
 import os
 
 class Config:
@@ -8,8 +9,10 @@ class Config:
     # JWT configuration
     JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'super-secret')
     # CORS configuration
-    CORS_ORIGINS = '*'
+    CORS_ORIGINS = [ "http://localhost:3000" , "*" ]
     CORS_SUPPORTS_CREDENTIALS = True
     CORS_ALLOW_HEADERS = ["Content-Type", "Authorization"]
     CORS_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-    UPLOAD_FOLDER = os.path.join('../static', 'uploads')
+
+    UPLOAD_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'static', 'uploads'))
+    MAX_CONTENT_LENGTH = 16 * 1024 * 1024

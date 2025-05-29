@@ -1,6 +1,6 @@
 # app/role_utils.py
-from .models import Role, User
-from . import db
+from app import db
+from app.models.user_model import Role, User
 
 # Dictionary with permissions for each role
 ROLE_PERMISSIONS = {

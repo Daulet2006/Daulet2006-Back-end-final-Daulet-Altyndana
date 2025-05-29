@@ -1,69 +1,137 @@
 from flask_restx import Namespace, Resource, fields, reqparse
-from flask import request, jsonify, send_from_directory, current_app
+from flask import send_from_directory, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from ..models import ChatMessage, User
-from .. import db
-from datetime import datetime
+from werkzeug.utils import secure_filename
+from openai import OpenAI
+from dotenv import load_dotenv
 import os
 import uuid
-from werkzeug.utils import secure_filename
-import openai
-from dotenv import load_dotenv
+import base64
+from datetime import datetime
+from app import db
+from app.models.chat_model import ChatMessage
+from app.models.product_model import Product
+from app.models.pet_model import Pet, PetStatus
+from app.models.category_model import Category
+import logging
 
-# Load environment variables
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Загрузка переменных окружения
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+api_key = os.getenv("OPENAI_API_KEY")
 
-chat_ns = Namespace('chat', description='Operations related to chat messages')
+# Инициализация клиента OpenAI
+client = OpenAI(api_key=api_key)
 
-# Allowed file extensions
+# Пространство имён
+chat_ns = Namespace('chat', description='Chat with AI assistant')
+
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx'}
 
-# Request parser for file uploads and message
-chat_parser = reqparse.RequestParser()
-chat_parser.add_argument('message', type=str, required=True, help='Chat message text')
-chat_parser.add_argument('file', type=reqparse.FileStorage, location='files', help='Optional file attachment')
-
-# Swagger models
-chat_message_model = chat_ns.model('ChatMessage', {
-    'message': fields.String(required=True, description='User message text'),
-    'file': fields.Raw(description='Optional file attachment (multipart/form-data)')
+file_model = chat_ns.model('File', {
+    'name': fields.String(),
+    'path': fields.String(),
+    'type': fields.String()
 })
 
 chat_response_model = chat_ns.model('ChatResponse', {
-    'id': fields.Integer(description='Message ID'),
-    'message': fields.String(description='User message'),
-    'reply': fields.String(description='AI reply'),
-    'timestamp': fields.String(description='Message timestamp (ISO format)'),
-    'file': fields.Nested(chat_ns.model('File', {
-        'name': fields.String(description='File name'),
-        'path': fields.String(description='File path'),
-        'type': fields.String(description='File MIME type')
-    }), description='Attached file details', required=False)
+    'id': fields.Integer(),
+    'message': fields.String(),
+    'reply': fields.String(),
+    'timestamp': fields.String(),
+    'file': fields.Nested(file_model, required=False)
 })
 
-# Helper functions
+chat_parser = reqparse.RequestParser()
+chat_parser.add_argument('message', type=str, required=True, help='User message cannot be blank')
+chat_parser.add_argument('file', type=reqparse.FileStorage, location='files')
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def get_ai_reply(message):
-    """
-    Get response from OpenAI Chat API.
-    """
+def extract_context(message):
+    """Генерация текстового контекста из базы данных по сообщению пользователя"""
+    context = ""
+    message_lower = message.lower()
+
+    product_keywords = ["корм", "товар", "товары", "цена", "продукт", "продукты"]
+    pet_keywords = ["собака", "собаки", "кошка", "кошки", "животное", "животные", "питомец", "питомцы"]
+
+    if any(k in message_lower for k in product_keywords):
+        products = Product.query.join(Category).limit(10).all()
+        context += "\n📦 Доступные товары:\n"
+        for product in products:
+            context += f"- {product.name} ({product.category.name}) — {product.price} руб., В наличии: {product.stock}\n"
+
+    if any(k in message_lower for k in pet_keywords):
+        pets = Pet.query.filter_by(status=PetStatus.AVAILABLE.value).limit(10).all()
+        context += "\n🐾 Доступные животные:\n"
+        for pet in pets:
+            context += f"- {pet.name} ({pet.species}, Порода: {pet.breed}) — {pet.price} руб.\n"
+
+    return context
+
+def get_ai_reply(message, user_id, file_path=None):
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "Ты помощник в зоомагазине. Отвечай дружелюбно, понятно и помогай с товарами и услугами для животных."},
-                {"role": "user", "content": message}
-            ],
-            temperature=0.7,
-            max_tokens=500
+        # Получение истории чата
+        recent_messages = ChatMessage.query.filter_by(user_id=user_id).order_by(
+            ChatMessage.timestamp.desc()
+        ).limit(5).all()
+
+        chat_history = "\nИстория диалога:\n"
+        for msg in reversed(recent_messages):
+            chat_history += f"Пользователь: {msg.message}\nИИ: {msg.reply}\n"
+
+        # Извлечение контекста
+        context = extract_context(message)
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Ты умный помощник зоомагазина и эксперт в области животных. Отвечай кратко (3–5 предложений), обязательно на основе предоставленного контекста и истории диалога. "
+                    "Не выдумывай данные. Если в контексте нет нужной информации — скажи об этом но не упоминая слово 'контекст'. "
+                    "Валюта в KZT. "
+                )
+            },
+            {
+                "role": "user",
+                "content": f"{chat_history}\nКонтекст:\n{context}\nПользователь: {message}"
+            }
+        ]
+
+        # Обработка изображения, если файл изображение
+        if file_path and file_path.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif'}:
+            full_path = os.path.join(current_app.config['UPLOAD_FOLDER'], file_path)
+            if os.path.exists(full_path):
+                with open(full_path, "rb") as image_file:
+                    image_data = base64.b64encode(image_file.read()).decode('utf-8')
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": message},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+                        ]
+                    })
+            else:
+                logger.error(f"Файл не найден: {full_path}")
+
+        # Запрос к OpenAI
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            max_tokens=200,
+            temperature=0.7
         )
-        return response['choices'][0]['message']['content']
+        reply = response.choices[0].message.content.strip()
+        logger.info(f"AI ответ для пользователя {user_id}: {reply}")
+        return reply
     except Exception as e:
-        print("OpenAI error:", e)
-        return "Извините, я не смог получить ответ от ИИ. Попробуйте позже."
+        logger.error(f"Ошибка OpenAI API: {str(e)}")
+        return "Извините, возникла ошибка. Попробуйте позже."
 
 @chat_ns.route('')
 class ChatMessageResource(Resource):
@@ -71,33 +139,31 @@ class ChatMessageResource(Resource):
     @chat_ns.expect(chat_parser)
     @chat_ns.marshal_with(chat_response_model, code=201)
     def post(self):
-        """Send a new chat message with optional file upload"""
         user_identity = get_jwt_identity()
         user_id = user_identity['id']
         args = chat_parser.parse_args()
         user_message = args['message']
         file = args['file']
 
-        file_path = None
-        file_name = None
-        file_type = None
+        file_path = file_name = file_type = None
 
-        # Handle file upload
+        # Обработка файла
         if file and file.filename and allowed_file(file.filename):
             filename = secure_filename(file.filename)
-            unique_filename = f"{uuid.uuid4()}_{filename}"
-            file_path = os.path.join(current_app.config['UPLOAD_FOLDER'], unique_filename)
-            os.makedirs(current_app.config['UPLOAD_FOLDER'], exist_ok=True)
-            file.save(file_path)
-            file_path = os.path.join('uploads', unique_filename)
+            unique_name = f"{uuid.uuid4()}_{filename}"
+            upload_dir = current_app.config['UPLOAD_FOLDER']
+            os.makedirs(upload_dir, exist_ok=True)
+            full_path = os.path.join(upload_dir, unique_name)
+            file.save(full_path)
+            file_path = unique_name
             file_name = filename
             file_type = file.content_type
+            logger.info(f"Файл загружен: {file_name} как {file_path}")
 
-        # Get AI reply
-        ai_reply = get_ai_reply(user_message)
+        # Ответ от ИИ
+        ai_reply = get_ai_reply(user_message, user_id, file_path)
 
-        # Save message to database
-        new_message = ChatMessage(
+        new_msg = ChatMessage(
             user_id=user_id,
             message=user_message,
             reply=ai_reply,
@@ -107,73 +173,63 @@ class ChatMessageResource(Resource):
             file_type=file_type
         )
 
-        db.session.add(new_message)
-        db.session.commit()
+        try:
+            db.session.add(new_msg)
+            db.session.commit()
+            logger.info(f"Сообщение сохранено, ID: {new_msg.id}")
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Ошибка базы данных: {str(e)}")
+            return {'message': 'Ошибка при сохранении сообщения'}, 500
 
-        # Prepare response
-        response_data = {
-            'id': new_message.id,
-            'message': new_message.message,
-            'reply': new_message.reply,
-            'timestamp': new_message.timestamp.isoformat()
+        result = {
+            'id': new_msg.id,
+            'message': new_msg.message,
+            'reply': new_msg.reply,
+            'timestamp': new_msg.timestamp.isoformat()
         }
-
         if file_path:
-            response_data['file'] = {
+            result['file'] = {
                 'name': file_name,
                 'path': file_path,
                 'type': file_type
             }
 
-        return response_data, 201
+        return result, 201
 
 @chat_ns.route('/history')
 class ChatHistoryResource(Resource):
     @jwt_required()
     @chat_ns.marshal_list_with(chat_response_model)
     def get(self):
-        """Get chat history for the authenticated user"""
         user_identity = get_jwt_identity()
         user_id = user_identity['id']
-
         messages = ChatMessage.query.filter_by(user_id=user_id).order_by(ChatMessage.timestamp).all()
-
-        formatted_messages = []
+        result = []
         for msg in messages:
-            message_data = {
+            msg_data = {
                 'id': msg.id,
                 'message': msg.message,
                 'reply': msg.reply,
                 'timestamp': msg.timestamp.isoformat()
             }
-
             if msg.file_path:
-                message_data['file'] = {
+                msg_data['file'] = {
                     'name': msg.file_name,
                     'path': msg.file_path,
                     'type': msg.file_type
                 }
+            result.append(msg_data)
 
-            formatted_messages.append(message_data)
-
-        return formatted_messages, 200
+        logger.info(f"История чата для пользователя {user_id} — {len(result)} сообщений")
+        return result, 200
 
 @chat_ns.route('/files/<path:filename>')
 class ChatFileResource(Resource):
-    @jwt_required()
     def get(self, filename):
-        """Download a file attached to a chat message"""
-        user_identity = get_jwt_identity()
-        user_id = user_identity['id']
-
-        # Verify user has access to the file
-        message = ChatMessage.query.filter_by(file_path=os.path.join('uploads', filename), user_id=user_id).first()
-
-        if not message:
-            return {'message': 'Файл не найден или у вас нет прав доступа'}, 404
-
-        # Send the file
-        return send_from_directory(
-            current_app.config['UPLOAD_FOLDER'],
-            filename
-        )
+        file_path = os.path.join(os.path.abspath(current_app.config['UPLOAD_FOLDER']), filename)
+        if not os.path.exists(file_path):
+            logger.error(f"Файл не найден: {file_path}")
+            return {'message': 'Файл не найден'}, 404
+        logger.info(f"Отдаётся файл: {filename}")
+        return send_from_directory(os.path.abspath(current_app.config['UPLOAD_FOLDER']), filename)

@@ -1,8 +1,9 @@
 from functools import wraps
 from flask import request, g, jsonify
 from flask_jwt_extended import  jwt_required, get_jwt_identity
-from .models import User
 from .role_utils import get_user_data_with_permissions
+from ..models.user_model import User
+
 
 def token_required(f):
     @wraps(f)

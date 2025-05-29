@@ -1,9 +1,11 @@
+# app/routes/category_routes.py
 from flask_restx import Namespace, Resource, fields
 from flask import request
 from flask_jwt_extended import jwt_required
-from ..models import Category, Role
+from app.models.category_model import Category
 from .. import db
-from ..utils import role_required
+from app.utils.util import role_required
+from app.models.user_model import Role
 
 category_ns = Namespace('categories', description='Operations related to product categories')
 
@@ -61,9 +63,11 @@ class CategoryResource(Resource):
         """Get a single category (public)"""
         try:
             category = Category.query.get_or_404(category_id)
-            return format_category(category), 200
+            return category.to_dict(), 200
         except Exception as e:
             return {'message': 'Failed to retrieve category', 'error': str(e)}, 500
+
+
 
     @jwt_required()
     @role_required(Role.ADMIN, Role.OWNER)
@@ -97,8 +101,8 @@ class CategoryResource(Resource):
         """Delete a category (Admin/Owner only)"""
         try:
             category = Category.query.get_or_404(category_id)
-            if category.products:
-                return {'message': 'Cannot delete category: It is associated with existing products.'}, 400
+            if category.products or category.pets: # Check for associated products or pets
+                return {'message': 'Cannot delete category: It is associated with existing products or pets.'}, 400
             db.session.delete(category)
             db.session.commit()
             return {'message': 'Category deleted successfully'}, 200

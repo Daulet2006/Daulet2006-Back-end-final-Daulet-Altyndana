@@ -1,11 +1,12 @@
+# app/routes/role_routes.py
 from flask_restx import Namespace, Resource, fields
-from flask import request, jsonify, g
+from flask import request, g
 from flask_jwt_extended import jwt_required
-from ..models import User, Role
-from ..role_utils import update_user_role, get_user_data_with_permissions
-from ..utils import role_required
+from app.models.user_model import User, Role
+from app.utils.role_utils import update_user_role, get_user_data_with_permissions
+from app.utils.util import role_required
 
-role_ns = Namespace('role', description='Operations related to user roles')
+role_ns = Namespace('role', description='Operations related to user user_model.py')
 
 # Swagger model
 role_update_model = role_ns.model('RoleUpdate', {
@@ -55,16 +56,16 @@ class RolesList(Resource):
     @jwt_required()
     @role_required(Role.OWNER)
     def get(self):
-        """Get all available roles"""
+        """Get all available user_model.py"""
         roles = [role.value for role in Role]
-        return {'roles': roles}, 200
+        return {'user_model.py': roles}, 200
 
 @role_ns.route('/users/roles')
 class UsersWithRoles(Resource):
     @jwt_required()
     @role_required(Role.OWNER, Role.ADMIN)
     def get(self):
-        """Get all users with their roles"""
+        """Get all users with their user_model.py"""
         users = User.query.all()
         result = [{
             'id': user.id,

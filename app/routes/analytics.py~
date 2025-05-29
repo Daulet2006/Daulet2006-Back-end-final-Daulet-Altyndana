@@ -1,0 +1,425 @@
+from flask import request
+from flask_restx import Namespace, Resource, fields
+from flask_jwt_extended import jwt_required
+
+from .. import db
+from ..models import Order, User, Product, Pet, Role, order_product, PetStatus, order_pet, AdminActionLog
+from ..utils import role_required
+from sqlalchemy import func, distinct
+from datetime import datetime, timedelta
+from sqlalchemy.exc import SQLAlchemyError
+import logging
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+analytics_ns = Namespace('analytics', description='Operations related to analytics', path='/analytics')
+
+# Модели для Swagger
+sales_analytics_model = analytics_ns.model('SalesAnalytics', {
+    'date': fields.String(description='Дата'),
+    'total_revenue': fields.Float(description='Общая выручка'),
+    'order_count': fields.Integer(description='Количество заказов'),
+    'product_count': fields.Integer(description='Количество проданных товаров'),
+    'pet_count': fields.Integer(description='Количество проданных питомцев')
+})
+
+user_behavior_model = analytics_ns.model('UserBehaviorAnalytics', {
+    'date': fields.String(description='Дата'),
+    'role': fields.String(description='Роль пользователя'),
+    'registration_count': fields.Integer(description='Количество регистраций'),
+    'order_count': fields.Integer(description='Количество заказов'),
+    'active_users': fields.Integer(description='Количество активных пользователей')
+})
+
+product_performance_model = analytics_ns.model('ProductPerformance', {
+    'product_id': fields.Integer(description='ID товара'),
+    'name': fields.String(description='Название товара'),
+    'total_sold': fields.Integer(description='Общее количество проданных единиц'),
+    'total_revenue': fields.Float(description='Общая выручка'),
+    'stock': fields.Integer(description='Текущий запас')
+})
+
+pet_performance_model = analytics_ns.model('PetPerformance', {
+    'pet_id': fields.Integer(description='ID питомца'),
+    'name': fields.String(description='Имя питомца'),
+    'status': fields.String(description='Статус питомца'),
+    'price': fields.Float(description='Цена'),
+    'sold': fields.Boolean(description='Продан ли питомец')
+})
+
+@analytics_ns.route('/sales')
+class SalesAnalytics(Resource):
+    @jwt_required()
+    @role_required(Role.ADMIN, Role.OWNER)
+    @analytics_ns.marshal_list_with(sales_analytics_model)
+    def get(self):
+        """Получить аналитику продаж по дням (выручка, заказы, товары, питомцы)"""
+        try:
+            start_date = request.args.get('startDate')
+            end_date = request.args.get('endDate')
+
+            query = Order.query.filter(Order.status == 'delivered')
+            if start_date and end_date:
+                try:
+                    start = datetime.strptime(start_date, '%Y-%m-%d')
+                    end = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                    query = query.filter(
+                        Order.order_date >= start,
+                        Order.order_date < end
+                    )
+                except ValueError:
+                    return {'message': 'Неверный формат даты. Используйте YYYY-MM-DD'}, 400
+
+            # Группировка по дате
+            results = (
+                query.with_entities(
+                    func.date(Order.order_date).label('date'),
+                    func.sum(Order.total_amount).label('total_revenue'),
+                    func.count(Order.id).label('order_count'),
+                    func.count(order_product.c.product_id).label('product_count'),
+                    func.count(order_pet.c.pet_id).label('pet_count')
+                )
+                .outerjoin(order_product, order_product.c.order_id == Order.id)
+                .outerjoin(order_pet, order_pet.c.order_id == Order.id)
+                .group_by(func.date(Order.order_date))
+                .order_by(func.date(Order.order_date))
+                .all()
+            )
+
+            # Форматирование результатов
+            data = [
+                {
+                    'date': result.date.strftime('%Y-%m-%d'),
+                    'total_revenue': float(result.total_revenue or 0),
+                    'order_count': result.order_count,
+                    'product_count': result.product_count,
+                    'pet_count': result.pet_count
+                }
+                for result in results
+            ]
+
+            logger.info(f"Возвращена аналитика продаж: {len(data)} записей")
+            return data, 200
+        except SQLAlchemyError as e:
+            logger.error(f"Ошибка базы данных при получении аналитики продаж: {str(e)}")
+            return {'message': 'Ошибка базы данных', 'error': str(e)}, 500
+        except Exception as e:
+            logger.error(f"Ошибка получения аналитики продаж: {str(e)}")
+            return {'message': 'Ошибка получения аналитики продаж', 'error': str(e)}, 500
+
+@analytics_ns.route('/users/behavior')
+class UserBehaviorAnalytics(Resource):
+  @jwt_required()
+  @role_required(Role.ADMIN, Role.OWNER)
+  @analytics_ns.marshal_list_with(user_behavior_model)
+  def get(self):
+    try:
+      start_date = request.args.get('startDate')
+      end_date = request.args.get('endDate')
+      query = User.query
+      order_query = Order.query.filter(Order.status == 'delivered')
+      if start_date and end_date:
+        try:
+          start = datetime.strptime(start_date, '%Y-%m-%d')
+          end = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+          query = query.filter(
+            User.created_at >= start,
+            User.created_at < end
+          )
+          order_query = order_query.filter(
+            Order.order_date >= start,
+            Order.order_date < end
+          )
+        except ValueError:
+          return {'message': 'Неверный формат даты. Используйте YYYY-MM-DD'}, 400
+      registration_results = (
+        query.with_entities(
+          func.date(User.created_at).label('date'),
+          User.role,
+          func.count().label('registration_count')
+        )
+        .group_by(func.date(User.created_at), User.role)
+        .all()
+      )
+      order_results = (
+        order_query.join(User, User.id == Order.client_id)
+        .with_entities(
+          func.date(Order.order_date).label('date'),
+          User.role,
+          func.count(Order.id).label('order_count')
+        )
+        .group_by(func.date(Order.order_date), User.role)
+        .all()
+      )
+      active_users = (
+        order_query.with_entities(
+          func.date(Order.order_date).label('date'),
+          func.count(distinct(Order.client_id)).label('active_users')
+        )
+        .group_by(func.date(Order.order_date))
+        .all()
+      )
+      dates = set(r.date for r in registration_results + order_results + active_users)
+      data = []
+      for date in sorted(dates):
+        for role in Role:
+          reg_count = next(
+            (r.registration_count for r in registration_results if r.date == date and r.role == role), 0
+          )
+          order_count = next(
+            (r.order_count for r in order_results if r.date == date and r.role == role), 0
+          )
+          active_count = next(
+            (r.active_users for r in active_users if r.date == date), 0
+          )
+          data.append({
+            'date': date.strftime('%Y-%m-%d'),
+            'role': role.value,
+            'registration_count': reg_count,
+            'order_count': order_count,
+            'active_users': active_count
+          })
+      logger.info(f"Возвращена аналитика поведения пользователей: {len(data)} записей")
+      return data, 200
+    except SQLAlchemyError as e:
+      logger.error(f"Ошибка базы данных при получении аналитики пользователей: {str(e)}")
+      return {'message': 'Ошибка базы данных', 'error': str(e)}, 500
+    except Exception as e:
+      logger.error(f"Ошибка получения аналитики пользователей: {str(e)}")
+      return {'message': 'Ошибка получения аналитики пользователей', 'error': str(e)}, 500 
+@analytics_ns.route('/products/performance')
+class ProductPerformanceAnalytics(Resource):
+    @jwt_required()
+    @role_required(Role.ADMIN, Role.OWNER)
+    @analytics_ns.marshal_list_with(product_performance_model)
+    def get(self):
+        """Получить аналитику производительности товаров (продажи, выручка, запас)"""
+        try:
+            start_date = request.args.get('startDate')
+            end_date = request.args.get('endDate')
+
+            query = Product.query.join(order_product).join(Order).filter(Order.status == 'delivered')
+            if start_date and end_date:
+                try:
+                    start = datetime.strptime(start_date, '%Y-%m-%d')
+                    end = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                    query = query.filter(
+                        Order.order_date >= start,
+                        Order.order_date < end
+                    )
+                except ValueError:
+                    return {'message': 'Неверный формат даты. Используйте YYYY-MM-DD'}, 400
+
+            results = (
+                query.with_entities(
+                    Product.id,
+                    Product.name,
+                    func.sum(order_product.c.quantity).label('total_sold'),
+                    func.sum(Product.price * order_product.c.quantity).label('total_revenue'),
+                    Product.stock
+                )
+                .group_by(Product.id, Product.name, Product.stock)
+                .order_by(func.sum(order_product.c.quantity).desc())
+                .all()
+            )
+
+            data = [
+                {
+                    'product_id': result.id,
+                    'name': result.name,
+                    'total_sold': result.total_sold,
+                    'total_revenue': float(result.total_revenue or 0),
+                    'stock': result.stock
+                }
+                for result in results
+            ]
+
+            logger.info(f"Возвращена аналитика производительности товаров: {len(data)} записей")
+            return data, 200
+        except SQLAlchemyError as e:
+            logger.error(f"Ошибка базы данных при получении аналитики товаров: {str(e)}")
+            return {'message': 'Ошибка базы данных', 'error': str(e)}, 500
+        except Exception as e:
+            logger.error(f"Ошибка получения аналитики товаров: {str(e)}")
+            return {'message': 'Ошибка получения аналитики товаров', 'error': str(e)}, 500
+
+@analytics_ns.route('/pets/performance')
+class PetPerformanceAnalytics(Resource):
+    @jwt_required()
+    @role_required(Role.ADMIN, Role.OWNER)
+    @analytics_ns.marshal_list_with(pet_performance_model)
+    def get(self):
+        """Получить аналитику производительности питомцев (статус, цена, продажи)"""
+        try:
+            start_date = request.args.get('startDate')
+            end_date = request.args.get('endDate')
+
+            query = Pet.query.join(order_pet, Pet.id == order_pet.c.pet_id).join(Order).filter(Order.status == 'delivered')
+            if start_date and end_date:
+                try:
+                    start = datetime.strptime(start_date, '%Y-%m-%d')
+                    end = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                    query = query.filter(
+                        Order.order_date >= start,
+                        Order.order_date < end
+                    )
+                except ValueError:
+                    return {'message': 'Неверный формат даты. Используйте YYYY-MM-DD'}, 400
+
+            results = (
+                query.with_entities(
+                    Pet.id,
+                    Pet.name,
+                    Pet.status,
+                    Pet.price
+                )
+                .group_by(Pet.id, Pet.name, Pet.status, Pet.price)
+                .all()
+            )
+
+            data = [
+                {
+                    'pet_id': result.id,
+                    'name': result.name,
+                    'status': result.status,
+                    'price': float(result.price or 0),
+                    'sold': result.status == PetStatus.SOLD.value
+                }
+                for result in results
+            ]
+
+            logger.info(f"Возвращена аналитика производительности питомцев: {len(data)} записей")
+            return data, 200
+        except SQLAlchemyError as e:
+            logger.error(f"Ошибка базы данных при получении аналитики питомцев: {str(e)}")
+            return {'message': 'Ошибка базы данных', 'error': str(e)}, 500
+        except Exception as e:
+            logger.error(f"Ошибка получения аналитики питомцев: {str(e)}")
+            return {'message': 'Ошибка получения аналитики питомцев', 'error': str(e)}, 500
+admin_action_model = analytics_ns.model('AdminAction', {
+    'id': fields.Integer(description='ID действия'),
+    'timestamp': fields.String(description='Время действия'),
+    'admin_id': fields.Integer(description='ID администратора'),
+    'admin_name': fields.String(description='Имя администратора'),
+    'action_type': fields.String(description='Тип действия'),
+    'details': fields.String(description='Детали действия')
+})
+
+@analytics_ns.route('/admin-actions')
+class AdminActionsAnalytics(Resource):
+    @jwt_required()
+    @role_required(Role.ADMIN, Role.OWNER)
+    @analytics_ns.marshal_list_with(admin_action_model)
+    def get(self):
+        """Получить аналитику действий администраторов"""
+        try:
+            start_date = request.args.get('startDate')
+            end_date = request.args.get('endDate')
+            admin_id = request.args.get('adminId')
+            action_type = request.args.get('actionType')
+
+            query = AdminActionLog.query.join(User, User.id == AdminActionLog.admin_id)
+            if start_date and end_date:
+                try:
+                    start = datetime.strptime(start_date, '%Y-%m-%d')
+                    end = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                    query = query.filter(
+                        AdminActionLog.timestamp >= start,
+                        AdminActionLog.timestamp < end
+                    )
+                except ValueError:
+                    return {'message': 'Неверный формат даты. Используйте YYYY-MM-DD'}, 400
+            if admin_id:
+                query = query.filter(AdminActionLog.admin_id == admin_id)
+            if action_type:
+                query = query.filter(AdminActionLog.action_type.ilike(f'%{action_type}%'))
+
+            results = query.order_by(AdminActionLog.timestamp.desc()).all()
+            data = [
+                {
+                    'id': action.id,
+                    'timestamp': action.timestamp.isoformat(),
+                    'admin_id': action.admin_id,
+                    'admin_name': action.admin.username,
+                    'action_type': action.action_type,
+                    'details': action.details
+                }
+                for action in results
+            ]
+            logger.info(f"Возвращено {len(data)} действий администраторов")
+            return data, 200
+        except SQLAlchemyError as e:
+            logger.error(f"Ошибка базы данных: {str(e)}")
+            return {'message': 'Ошибка базы данных', 'error': str(e)}, 500
+        except Exception as e:
+            logger.error(f"Ошибка получения аналитики: {str(e)}")
+            return {'message': 'Ошибка получения данных', 'error': str(e)}, 500
+
+@analytics_ns.route('/logs')
+class AdminLogs(Resource):
+    @jwt_required()
+    @role_required(Role.ADMIN, Role.OWNER)
+    @analytics_ns.marshal_with(analytics_ns.model('Log', {
+        'timestamp': fields.String(description='Время лога'),
+        'message': fields.String(description='Сообщение лога'),
+        'admin_id': fields.Integer(description='ID администратора'),
+        'action_type': fields.String(description='Тип действия')
+    }))
+    def get(self):
+        """Получить логи администраторов с пагинацией"""
+        try:
+            page = int(request.args.get('page', 1))
+            limit = int(request.args.get('limit', 10))
+            start_date = request.args.get('startDate')
+            end_date = request.args.get('endDate')
+            admin_id = request.args.get('adminId')
+            action_type = request.args.get('actionType')
+            search = request.args.get('search')
+
+            query = AdminActionLog.query.join(User, User.id == AdminActionLog.admin_id)
+            if start_date and end_date:
+                try:
+                    start = datetime.strptime(start_date, '%Y-%m-%d')
+                    end = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                    query = query.filter(
+                        AdminActionLog.timestamp >= start,
+                        AdminActionLog.timestamp < end
+                    )
+                except ValueError:
+                    return {'message': 'Неверный формат даты. Используйте YYYY-MM-DD'}, 400
+            if admin_id:
+                query = query.filter(AdminActionLog.admin_id == admin_id)
+            if action_type:
+                query = query.filter(AdminActionLog.action_type.ilike(f'%{action_type}%'))
+            if search:
+                query = query.filter(
+                    db.or_(
+                        AdminActionLog.details.ilike(f'%{search}%'),
+                        User.username.ilike(f'%{search}%')
+                    )
+                )
+
+            paginated = query.paginate(page=page, per_page=limit, error_out=False)
+            logs = [
+                {
+                    'timestamp': log.timestamp.isoformat(),
+                    'message': log.details or f'{log.admin.username} performed {log.action_type}',
+                    'admin_id': log.admin_id,
+                    'action_type': log.action_type
+                }
+                for log in paginated.items
+            ]
+            logger.info(f"Возвращено {len(logs)} логов, страница {page}")
+            return {'logs': logs, 'total': paginated.total}, 200
+        except SQLAlchemyError as e:
+            logger.error(f"Ошибка базы данных: {str(e)}")
+            return {'message': 'Ошибка базы данных', 'error': str(e)}, 500
+        except Exception as e:
+            logger.error(f"Ошибка получения логов: {str(e)}")
+            return {'message': 'Ошибка получения логов', 'error': str(e)}, 500

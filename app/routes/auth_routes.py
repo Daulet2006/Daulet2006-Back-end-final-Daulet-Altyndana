@@ -1,75 +1,90 @@
 from flask_restx import Namespace, Resource, fields
 from flask import request, jsonify
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, unset_jwt_cookies
-from ..models import User, Role
+from sqlalchemy import func
 from .. import db, bcrypt
-from ..role_utils import get_user_data_with_permissions
+from app.utils.role_utils import get_user_data_with_permissions
 from sqlalchemy.exc import IntegrityError
 import datetime
+import re
+from app.models.user_model import User, Role
 
-auth_ns = Namespace('auth', description='Authentication operations', tags=['Authentication'])
+auth_ns = Namespace('auth', description='Операции аутентификации', tags=['Аутентификация'])
+
 register_model = auth_ns.model('Register', {
-    'username': fields.String(required=True, description='User username'),
-    'email': fields.String(required=True, description='User email'),
-    'password': fields.String(required=True, description='User password'),
-    'role': fields.String(required=True, description='User role')
+    'username': fields.String(required=True, description='Имя пользователя'),
+    'email': fields.String(required=True, description='Электронная почта'),
+    'password': fields.String(required=True, description='Пароль')
 })
 
 login_model = auth_ns.model('Login', {
-    'email': fields.String(required=True, description='User email'),
-    'password': fields.String(required=True, description='User password')
+    'email': fields.String(required=True, description='Электронная почта'),
+    'password': fields.String(required=True, description='Пароль')
 })
+
+PASSWORD_REGEX = re.compile(r'^(?=.*[A-Za-z])(?=.*\d).{6,}$')
+EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
+
+@auth_ns.route('/roles')
+class Roles(Resource):
+    def get(self):
+        roles = [role.value for role in Role]
+        return {'user_model.py': roles}, 200
+
+def get_next_user_id():
+    max_id = db.session.query(func.max(User.id)).scalar()  # Получаем максимальный id
+    if max_id is None:  # Если пользователей нет, начинаем с 1
+        return 1
+    return max_id + 1  # Увеличиваем максимальный id на 1
 
 @auth_ns.route('/register')
 class Register(Resource):
     @auth_ns.expect(register_model)
     def post(self):
-        """Register a new user"""
+        """Регистрация нового пользователя (по умолчанию роль CLIENT)"""
         data = request.get_json()
-        if not all(k in data for k in ('username', 'email', 'password', 'role')):
-            return {'message': 'Invalid data. Ensure you provide username, email, password, and role.'}, 400
+        if not all(k in data for k in ('username', 'email', 'password')):
+            return {'message': 'Отсутствуют обязательные поля: username, email, password.'}, 400
+
+        if not EMAIL_REGEX.match(data['email']):
+            return {'message': 'Неверный формат email.'}, 400
+
+        if not PASSWORD_REGEX.match(data['password']):
+            return {'message': 'Пароль должен быть минимум 6 символов, содержать хотя бы одну букву и одну цифру.'}, 400
 
         if User.query.filter_by(email=data['email']).first():
-            return {'message': 'Email already registered. Please try logging in or use a different email.'}, 400
-
+            return {'message': 'Email уже зарегистрирован.'}, 400
         if User.query.filter_by(username=data['username']).first():
-            return {'message': 'Username already taken. Please choose a different username.'}, 400
+            return {'message': 'Имя пользователя занято.'}, 400
 
-        role_value = data['role']
-        role_enum = None
-        for role in Role:
-            if role.value == role_value:
-                role_enum = role
-                break
-
-        if not role_enum:
-            return {'message': f'Invalid role: {role_value}. Valid roles: {[r.value for r in Role]}'}, 400
+        # Генерация следующего уникального ID
+        new_user_id = get_next_user_id()
 
         new_user = User(
+            id=new_user_id,  # Явно указываем id
             username=data['username'],
             email=data['email'],
             password=bcrypt.generate_password_hash(data['password']).decode('utf-8'),
-            role=role_enum
+            role=Role.CLIENT.value
         )
 
         try:
             db.session.add(new_user)
             db.session.commit()
-        except IntegrityError as e:
+        except IntegrityError:
             db.session.rollback()
-            error_message = str(e.orig) if e.orig else 'Database integrity error'
-            return {'message': f'Failed to register user: {error_message}. Please try again.'}, 500
+            return {'message': 'Ошибка базы данных: невозможно зарегистрировать пользователя.'}, 500
 
         access_token = create_access_token(identity={
             'id': new_user.id,
             'username': new_user.username,
             'role': new_user.role.value
-        }, expires_delta=datetime.timedelta(days=1))
+        }, expires_delta=datetime.timedelta(minutes=30))
 
         user_data = get_user_data_with_permissions(new_user)
 
         return {
-            'message': 'User registered and logged in successfully.',
+            'message': 'Пользователь успешно зарегистрирован.',
             'access_token': access_token,
             'user': user_data
         }, 201
@@ -78,38 +93,58 @@ class Register(Resource):
 class Login(Resource):
     @auth_ns.expect(login_model)
     def post(self):
-        """Login a user"""
+        """Вход пользователя"""
         data = request.get_json()
+        if not all(k in data for k in ('email', 'password')):
+            return {'message': 'Отсутствуют обязательные поля: email, password.'}, 400
+
+        if not EMAIL_REGEX.match(data['email']):
+            return {'message': 'Неверный формат email.'}, 400
+
         user = User.query.filter_by(email=data['email']).first()
 
         if not user:
-            return {'message': 'User not found. Please check your email.'}, 404
+            return {'message': 'Пользователь не найден.'}, 404
 
         if user.isBanned:
-            return {'message': 'Your account has been banned. Please contact support.'}, 403
+            return {'message': 'Ваш аккаунт заблокирован. Обратитесь в поддержку.'}, 403
 
-        if user and bcrypt.check_password_hash(user.password, data['password']):
+        if bcrypt.check_password_hash(user.password, data['password']):
             access_token = create_access_token(identity={
                 'id': user.id,
                 'username': user.username,
                 'role': user.role.value
-            }, expires_delta=datetime.timedelta(days=1))
+            }, expires_delta=datetime.timedelta(minutes=30))
 
             user_data = get_user_data_with_permissions(user)
 
             return {
-                'message': 'Login successful.',
+                'message': 'Вход выполнен успешно.',
                 'access_token': access_token,
                 'user': user_data
             }, 200
 
-        return {'message': 'Invalid credentials. Please check your email and password.'}, 401
+        return {'message': 'Неверный пароль.'}, 401
 
 @auth_ns.route('/logout')
 class Logout(Resource):
     @jwt_required()
     def post(self):
-        """Logout a user"""
-        response = jsonify({'message': 'Successfully logged out.'})
+        """Выход пользователя"""
+        response = jsonify({'message': 'Выход выполнен успешно.'})
         unset_jwt_cookies(response)
         return response
+
+@auth_ns.route('/verify')
+class VerifyToken(Resource):
+    @jwt_required()
+    def get(self):
+        """Проверка валидности токена"""
+        identity = get_jwt_identity()
+        user = User.query.get(identity['id'])
+        if not user:
+            return {'message': 'Пользователь не найден.'}, 404
+        return {
+            'message': 'Токен действителен.',
+            'user': get_user_data_with_permissions(user)
+        }, 200
